@@ -594,19 +594,23 @@ function dataUrlToBase64(dataUrl) {
   return dataUrl.split(',')[1];
 }
 
-// Single photo analysis with Gemini — with retry on rate limit
+// Single photo analysis with Gemini — simplified prompt, plain text response
 async function analysePhoto(photo, retries = 2) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      // Reuse the data URL already loaded during upload — no extra file read needed
       const b64 = dataUrlToBase64(photo.url);
       const mt = photo.file.type || 'image/jpeg';
-      const dateStr = photo.exifDate ? new Date(photo.exifDate).toLocaleString() : 'unknown';
 
-      const prompt = `Ophthalmologist photo organizer. Photo timestamp: ${dateStr}.
-Analyse this image. Respond ONLY with a JSON object — no markdown, no extra text:
-{"type":"chart"|"eye"|"personal"|"unknown","patientName":"string or null","nameConfidence":"high"|"medium"|"low"|"none","isPersonal":true|false,"personalReason":"string or null"}
-chart=medical chart/patient record/ID with patient info. eye=close-up eye/eyelid/periorbital area. personal=vacation/food/selfie/family/non-medical. Extract patient name only from chart photos.`;
+      // Simple, direct prompt — plain text response to avoid JSON parse failures
+      const prompt = `You are sorting photos for an ophthalmologist (eye doctor).
+
+Look at this photo and answer with EXACTLY ONE of these words only:
+- PERSONAL  (if it is a vacation photo, food, scenery, selfie, family, pets, or anything unrelated to eye medicine)
+- CHART  (if it shows a medical chart, patient record, or document with a patient name)
+- EYE  (if it shows a close-up of a human eye, eyelid, or the area around the eye)
+- OTHER  (anything else medical but not an eye or chart)
+
+Reply with only the single word. Nothing else.`;
 
       const resp = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
@@ -620,7 +624,7 @@ chart=medical chart/patient record/ID with patient info. eye=close-up eye/eyelid
                 { text: prompt }
               ]
             }],
-            generationConfig: { maxOutputTokens: 300, temperature: 0.1 }
+            generationConfig: { maxOutputTokens: 10, temperature: 0 }
           })
         }
       );
@@ -636,18 +640,23 @@ chart=medical chart/patient record/ID with patient info. eye=close-up eye/eyelid
       }
 
       const data = await resp.json();
-      const raw = (data.candidates?.[0]?.content?.parts?.[0]?.text || '{}')
-        .replace(/```json|```/g, '').trim();
+      const raw = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().toUpperCase();
+      console.log(`Gemini [${photo.file.name}]: "${raw}"`);
 
-      // Debug: log raw response to console so we can diagnose issues
-      console.log(`Gemini response for ${photo.file.name}:`, raw);
+      // Map plain text response to our result format
+      const isPersonal = raw.includes('PERSONAL');
+      const type = isPersonal ? 'personal'
+        : raw.includes('CHART') ? 'chart'
+        : raw.includes('EYE') ? 'eye'
+        : 'unknown';
 
-      try {
-        return JSON.parse(raw);
-      } catch (parseErr) {
-        console.warn('JSON parse failed:', raw);
-        return { type: 'unknown', patientName: null, nameConfidence: 'none', isPersonal: false };
-      }
+      return {
+        type,
+        isPersonal,
+        personalReason: isPersonal ? 'non-medical content' : null,
+        patientName: null,
+        nameConfidence: 'none'
+      };
 
     } catch (err) {
       console.error(`analysePhoto error (attempt ${attempt}):`, err.message);
